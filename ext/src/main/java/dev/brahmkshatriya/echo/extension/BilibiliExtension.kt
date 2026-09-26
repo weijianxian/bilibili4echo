@@ -77,7 +77,7 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Tra
             val owner = video["owner"].obj()
             val artist = Artist(owner["mid"].str(), owner["name"].str(),
                 image(owner["face"].str()), isFollowable = false)
-            uploadTrack(video, artist)?.let(::Shelf.Item)
+            uploadTrack(video, artist)?.let { Shelf.Item(it) }
         }
         val total = result["page"].obj()["count"].number()
         Page<Shelf>(items, if (items.isNotEmpty() && page * 30 < total)
@@ -186,19 +186,19 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Tra
             val page = (cursor?.toIntOrNull() ?: 1).coerceAtLeast(1)
             val data = api.userVideos(mid, page)
             val items = data["list"].obj()["vlist"].array().mapNotNull {
-                uploadTrack(it.obj(), artist)?.let(::Shelf.Item)
+                uploadTrack(it.obj(), artist)?.let { track -> Shelf.Item(track) }
             }
             val count = data["page"].obj()["count"].number()
-            Page(items, if (items.isNotEmpty() && page * 30 < count) (page + 1).toString() else null)
+            Page<Shelf>(items, if (items.isNotEmpty() && page * 30 < count) (page + 1).toString() else null)
         }.toFeed()
 
     private fun collectionFeed(mid: String): Feed<Shelf> =
         PagedData.Continuous<Shelf> { cursor ->
             val page = (cursor?.toIntOrNull() ?: 1).coerceAtLeast(1)
             val data = api.userCollections(mid, page)
-            val items = collectionItems(data).map(::Shelf.Item)
+            val items = collectionItems(data).map { Shelf.Item(it) }
             val total = data["page"].obj()["total"].integer()
-            Page(items, if (items.isNotEmpty() && page * 20 < total) (page + 1).toString() else null)
+            Page<Shelf>(items, if (items.isNotEmpty() && page * 20 < total) (page + 1).toString() else null)
         }.toFeed()
 
     private fun collectionItems(data: kotlinx.serialization.json.JsonObject): List<Playlist> =
