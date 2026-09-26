@@ -10,9 +10,10 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 import okhttp3.Cookie
-import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -24,20 +25,26 @@ internal fun JsonElement?.integer(): Int = (this as? JsonPrimitive)?.intOrNull ?
 
 /** Requests only Bilibili hosts. Playback CDN URLs are passed to Echo, never fetched here. */
 internal class BilibiliApi {
-    private val cookies = object : CookieJar {
-        private val entries = mutableMapOf<String, Cookie>()
-        @Synchronized override fun saveFromResponse(url: okhttp3.HttpUrl, cookies: List<Cookie>) {
-            cookies.forEach { entries["${it.domain}|${it.name}"] = it }
-        }
-        @Synchronized override fun loadForRequest(url: okhttp3.HttpUrl): List<Cookie> {
-            val now = System.currentTimeMillis()
-            entries.entries.removeAll { it.value.expiresAt < now }
-            return entries.values.filter { it.matches(url) }
+    // Echo's minified OkHttp expects its default NO_COOKIES jar to return EmptyList.
+    // Supplying a custom CookieJar that returns an ArrayList crashes its dispatcher.
+    // Keep guest cookies here and attach them as request headers instead.
+    private val cookies = mutableMapOf<String, Cookie>()
+
+    internal fun rememberCookies(response: Response) {
+        val received = Cookie.parseAll(response.request.url, response.headers)
+        synchronized(cookies) {
+            received.forEach { cookies["${it.domain}|${it.name}"] = it }
         }
     }
 
+    internal fun cookieHeader(url: HttpUrl): String = synchronized(cookies) {
+        val now = System.currentTimeMillis()
+        cookies.entries.removeAll { it.value.expiresAt < now }
+        cookies.values.filter { it.matches(url) }
+            .joinToString("; ") { "${it.name}=${it.value}" }
+    }
+
     private val client = OkHttpClient.Builder()
-        .cookieJar(cookies)
         .followRedirects(false)
         .callTimeout(25, TimeUnit.SECONDS)
         .build()
@@ -48,12 +55,15 @@ internal class BilibiliApi {
 
     private suspend fun get(url: String, referer: String = "https://www.bilibili.com/"): JsonObject {
         require(url.startsWith("https://api.bilibili.com/") || url.startsWith("https://www.bilibili.com/audio/"))
-        val request = Request.Builder().url(url)
+        val builder = Request.Builder().url(url)
             .header("User-Agent", USER_AGENT)
             .header("Referer", referer)
             .header("Origin", "https://www.bilibili.com")
-            .build()
+        cookieHeader(builder.build().url).takeIf { it.isNotEmpty() }
+            ?.let { builder.header("Cookie", it) }
+        val request = builder.build()
         return client.newCall(request).await().use { response ->
+            rememberCookies(response)
             if (!response.isSuccessful) error("Bilibili HTTP ${response.code}")
             val body = response.body?.string() ?: error("Bilibili returned an empty response")
             json.parseToJsonElement(body).obj()
@@ -74,7 +84,7 @@ internal class BilibiliApi {
         // Search requires buvid3. A normal visit lets the site issue its own guest cookie.
         val request = Request.Builder().url("https://www.bilibili.com/")
             .header("User-Agent", USER_AGENT).build()
-        client.newCall(request).await().close()
+        client.newCall(request).await().use { rememberCookies(it) }
         seeded = true
     }
 
