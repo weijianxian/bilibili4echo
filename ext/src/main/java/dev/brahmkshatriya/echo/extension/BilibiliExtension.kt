@@ -54,35 +54,40 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Tra
     override fun setSettings(settings: Settings) = Unit
     override suspend fun getSettingItems(): List<Setting> = emptyList()
 
-    override suspend fun loadHomeFeed(): Feed<Shelf> = discover()
-
-    private fun discover(): Feed<Shelf> = (listOfNotNull<Shelf>(
-        activeUser?.let { Shelf.Item(Artist(it.id, it.name, it.cover, subtitle = "我的 B 站主页")) }
-    ) + listOf<Shelf>(
-        Shelf.Category("region:3", "音乐", regionFeed(3)),
-        Shelf.Category("region:28", "原创音乐", regionFeed(28)),
-        Shelf.Category("region:31", "翻唱", regionFeed(31)),
-        Shelf.Category("region:59", "演奏", regionFeed(59)),
-        Shelf.Category("region:30", "VOCALOID", regionFeed(30)),
-        Shelf.Category("region:267", "电台", regionFeed(267)),
-        Shelf.Category("region:36", "知识", regionFeed(36)),
-        Shelf.Category("region:188", "科技", regionFeed(188))
-    )).toFeed()
-
-    private fun regionFeed(rid: Int): Feed<Shelf> = PagedData.Continuous<Shelf> { cursor ->
+    override suspend fun loadHomeFeed(): Feed<Shelf> = PagedData.Continuous<Shelf> { cursor ->
         val page = (cursor?.toIntOrNull() ?: 1).coerceAtLeast(1)
-        val result = api.region(rid, page)
-        val items = result["archives"].array().mapNotNull { row ->
+        homePage(page, api.popular(page))
+    }.toFeed()
+
+    internal fun homePage(page: Int, result: kotlinx.serialization.json.JsonObject): Page<Shelf> {
+        val items = result["list"].array().mapNotNull { row ->
             val video = row.obj()
             val owner = video["owner"].obj()
             val artist = Artist(owner["mid"].str(), owner["name"].str(),
                 image(owner["face"].str()), isFollowable = false)
             uploadTrack(video, artist)?.let { Shelf.Item(it) }
         }
-        val total = result["page"].obj()["count"].number()
-        Page<Shelf>(items, if (items.isNotEmpty() && page * 30 < total)
+        return Page<Shelf>((if (page == 1) homeHeader() else emptyList()) + items,
+            if (items.isNotEmpty() && result["no_more"].str() != "true")
             (page + 1).toString() else null)
-    }.toFeed()
+    }
+
+    private fun homeHeader(): List<Shelf> = listOf<Shelf>(Shelf.Lists.Categories(
+        id = "home-regions", title = "分区", list = listOf(
+            Shelf.Category("region:3", "音乐", search("音乐", 3)),
+            Shelf.Category("region:28", "原创音乐", search("原创音乐", 28)),
+            Shelf.Category("region:31", "翻唱", search("翻唱", 31)),
+            Shelf.Category("region:59", "演奏", search("演奏", 59)),
+            Shelf.Category("region:30", "VOCALOID", search("VOCALOID", 30)),
+            Shelf.Category("region:267", "电台", search("电台", 267)),
+            Shelf.Category("region:36", "知识", search("知识", 36)),
+            Shelf.Category("region:188", "科技", search("科技", 188))
+        )
+    )) + listOfNotNull(
+        activeUser?.let { Shelf.Item(Artist(it.id, it.name, it.cover, subtitle = "我的 B 站主页")) }
+    )
+
+    private fun discover(): Feed<Shelf> = homeHeader().toFeed()
 
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
         val q = query.trim()
@@ -118,9 +123,9 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Tra
         return search(q)
     }
 
-    private fun search(keyword: String): Feed<Shelf> = PagedData.Continuous<Shelf> { cursor ->
+    private fun search(keyword: String, tid: Int? = null): Feed<Shelf> = PagedData.Continuous<Shelf> { cursor ->
         val page = (cursor?.toIntOrNull() ?: 1).coerceIn(1, 50)
-        val result = api.searchVideos(keyword, page)
+        val result = api.searchVideos(keyword, page, tid)
         val tracks = result["result"].array().mapNotNull { item ->
             val row = item.obj()
             val bvid = row["bvid"].str()
@@ -156,29 +161,50 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Tra
         val mid = validId(artist.id)
         return PagedData.Continuous<Shelf> { cursor ->
             val page = (cursor?.toIntOrNull() ?: 1).coerceAtLeast(1)
-            val shelves = mutableListOf<Shelf>()
-            if (page == 1) {
-                val collections = api.userCollections(mid, 1)
-                val playlists = collectionItems(collections)
-                if (playlists.isNotEmpty()) shelves += Shelf.Lists.Categories(
-                    id = "collections:$mid", title = "合集与列表",
-                    list = playlists.map { playlist ->
-                        Shelf.Category(playlist.id, playlist.title,
-                            listOf<Shelf>(Shelf.Item(playlist)).toFeed(),
-                            image = playlist.cover)
-                    }, more = collectionFeed(mid)
-                )
-            }
-            val uploads = api.userVideos(mid, page)
+            // The only upload shelf is on page one. Further homepage pages contain collections.
+            val uploads = if (page == 1) api.userVideos(mid, 1) else null
+            val collections = api.userCollections(mid, page)
+            val shelves = artistShelves(artist, uploads, collections)
+            val total = collections["page"].obj()["total"].number()
+            val collectionCount = collections["seasons_list"].array().size +
+                collections["series_list"].array().size
+            Page(shelves, if (collectionCount > 0 && page * 20 < total)
+                (page + 1).toString() else null)
+        }.toFeed()
+    }
+
+    internal fun artistShelves(artist: Artist, uploads: kotlinx.serialization.json.JsonObject?,
+                               collections: kotlinx.serialization.json.JsonObject): List<Shelf> {
+        val shelves = mutableListOf<Shelf>()
+        if (uploads != null) {
             val videos = uploads["list"].obj()["vlist"].array()
                 .mapNotNull { uploadTrack(it.obj(), artist) }
             if (videos.isNotEmpty()) shelves += Shelf.Lists.Tracks(
-                id = "uploads:$mid:$page", title = if (page == 1) "最新投稿" else "更多投稿",
-                list = videos, more = if (page == 1) uploadFeed(mid, artist) else null
+                id = "uploads:${artist.id}", title = "全部投稿", list = videos,
+                more = uploadFeed(artist.id, artist)
             )
-            val count = uploads["page"].obj()["count"].number()
-            Page(shelves, if (videos.isNotEmpty() && page * 30 < count) (page + 1).toString() else null)
-        }.toFeed()
+        }
+        listOf("seasons_list" to "season", "series_list" to "series").forEach { (key, type) ->
+            collections[key].array().forEach collection@{ item ->
+                val row = item.obj()
+                val playlist = playlistFromMeta(row["meta"].obj(), type) ?: return@collection
+                val previews = row["archives"].array()
+                    .mapNotNull { uploadTrack(it.obj(), artist) }
+                shelves += if (previews.isEmpty()) Shelf.Item(playlist) else Shelf.Lists.Tracks(
+                    id = playlist.id, title = playlist.title, subtitle = playlist.subtitle,
+                    list = previews, more = collectionTrackFeed(playlist)
+                )
+            }
+        }
+        return shelves
+    }
+
+    private fun collectionTrackFeed(playlist: Playlist): Feed<Shelf> = Feed(emptyList()) {
+        val source = loadTracks(playlist).getPagedData(null).pagedData
+        val items: PagedData<Shelf> = source.map { result ->
+            result.getOrThrow().map { track -> Shelf.Item(track) }
+        }
+        Feed.Data(items)
     }
 
     private fun uploadFeed(mid: String, artist: Artist): Feed<Shelf> =
@@ -191,23 +217,6 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Tra
             val count = data["page"].obj()["count"].number()
             Page<Shelf>(items, if (items.isNotEmpty() && page * 30 < count) (page + 1).toString() else null)
         }.toFeed()
-
-    private fun collectionFeed(mid: String): Feed<Shelf> =
-        PagedData.Continuous<Shelf> { cursor ->
-            val page = (cursor?.toIntOrNull() ?: 1).coerceAtLeast(1)
-            val data = api.userCollections(mid, page)
-            val items = collectionItems(data).map { Shelf.Item(it) }
-            val total = data["page"].obj()["total"].integer()
-            Page<Shelf>(items, if (items.isNotEmpty() && page * 20 < total) (page + 1).toString() else null)
-        }.toFeed()
-
-    private fun collectionItems(data: kotlinx.serialization.json.JsonObject): List<Playlist> =
-        listOf("seasons_list" to "season", "series_list" to "series").flatMap { (key, type) ->
-            data[key].array().mapNotNull { item ->
-                val meta = item.obj()["meta"].obj()
-                playlistFromMeta(meta, type)
-            }
-        }
 
     private fun playlistFromMeta(meta: kotlinx.serialization.json.JsonObject, type: String): Playlist? {
         val mid = meta["mid"].str().takeIf { it.all(Char::isDigit) && it.isNotEmpty() } ?: return null

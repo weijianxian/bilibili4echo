@@ -156,17 +156,18 @@ internal class BilibiliApi {
         return value
     }
 
-    suspend fun searchVideos(keyword: String, page: Int): JsonObject = signed(
+    suspend fun searchVideos(keyword: String, page: Int, tid: Int? = null): JsonObject = signed(
         "/x/web-interface/wbi/search/type",
-        mapOf("search_type" to "video", "keyword" to keyword, "page" to page.toString())
+        mapOf("search_type" to "video", "keyword" to keyword, "page" to page.toString()) +
+            (tid?.let { mapOf("tids" to it.toString()) } ?: emptyMap())
+    )
+
+    suspend fun popular(page: Int): JsonObject = data(
+        "https://api.bilibili.com/x/web-interface/popular?pn=$page&ps=20"
     )
 
     suspend fun userInfo(mid: String): JsonObject = signed(
         "/x/space/wbi/acc/info", mapOf("mid" to mid)
-    )
-
-    suspend fun region(rid: Int, page: Int): JsonObject = data(
-        "https://api.bilibili.com/x/web-interface/dynamic/region?rid=$rid&pn=$page&ps=30"
     )
 
     suspend fun userVideos(mid: String, page: Int): JsonObject = signed(

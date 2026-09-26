@@ -7,9 +7,9 @@ An independent **music extension APK** for the Android version of [Echo](https:/
 - Search Bilibili videos, page through results, and play the audio-only DASH streams.
 - Paste a BV link/ID, `av` ID, or `au` audio link/ID into Echo's search box.
 - Display video parts in a track's detail feed; pick a part to play its own CID.
-- Browse music, vocaloid, radio, knowledge, and technology sections from the home feed.
+- Browse music, vocaloid, radio, knowledge, and technology categories above a paginated popular-video feed.
 - Sign in through Echo's Bilibili WebView; open your own creator profile from the home feed.
-- Open other creators through their space URL or `mid:<UID>` and browse paged uploads and collections.
+- Open other creators through their space URL or `mid:<UID>`; their page shows one uploads row followed by each collection's track preview. Uploads and collection contents load by page as you scroll.
 - Open Bilibili video collections and series as Echo playlists, with paged audio tracks.
 - Fetch a fresh stream URL for each playback resolution; URLs are short lived.
 
@@ -50,7 +50,8 @@ The user-provided January 2026 archive contains the project's closure notice but
 | WebView login check | `GET api.bilibili.com/x/web-interface/nav` |
 | Creator profile and uploads | `GET api.bilibili.com/x/space/wbi/acc/info`, `/x/space/wbi/arc/search` |
 | Creator collections and series | `GET api.bilibili.com/x/polymer/web-space/seasons_series_list`, `/x/polymer/web-space/seasons_archives_list`, `/x/series/archives` |
-| Home sections | `GET api.bilibili.com/x/web-interface/dynamic/region` |
+| Home feed | `GET api.bilibili.com/x/web-interface/popular` |
+| Category filtering | `GET api.bilibili.com/x/web-interface/wbi/search/type` (`tids`) |
 
 The archive is from January 2026 and these endpoints may change. The app uses only video audio streams, never a video container. It does not include or redistribute the API archive.
 
