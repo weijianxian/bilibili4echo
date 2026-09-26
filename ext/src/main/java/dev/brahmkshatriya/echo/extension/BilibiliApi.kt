@@ -294,9 +294,9 @@ internal class BilibiliApi {
         "/x/v3/fav/folder/add", mapOf("title" to title, "intro" to description.orEmpty(), "privacy" to "0")
     )
 
-    suspend fun editFolder(mediaId: String, title: String, description: String?, private: Boolean) {
+    suspend fun editFolder(mediaId: String, title: String, description: String?, isPrivate: Boolean) {
         post("/x/v3/fav/folder/edit", mapOf("media_id" to mediaId, "title" to title,
-            "intro" to description.orEmpty(), "privacy" to if (private) "1" else "0"))
+            "intro" to description.orEmpty(), "privacy" to if (isPrivate) "1" else "0"))
     }
 
     suspend fun deleteFolder(mediaId: String) {

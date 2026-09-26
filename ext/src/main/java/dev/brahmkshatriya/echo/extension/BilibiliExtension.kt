@@ -113,12 +113,21 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, QuickSearchClient, Tr
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
         val q = query.trim()
         if (q.isEmpty()) return discover()
+        val favoriteUrl = Regex("space\\.bilibili\\.com/([0-9]+)/favlist\\?[^#]*\\bfid=([0-9]+)")
+            .find(q)
+        if (favoriteUrl != null) {
+            val (mid, fid) = favoriteUrl.destructured
+            return listOf<Shelf>(Shelf.Item(loadPlaylist(Playlist(
+                "fav:$mid:$fid", "收藏夹", isEditable = activeUser?.id == mid
+            )))).toFeed()
+        }
         val collectionUrl = Regex("space\\.bilibili\\.com/([0-9]+)/.*[?&]sid=([0-9]+)")
             .find(q)
         if (collectionUrl != null) {
             val (mid, sid) = collectionUrl.destructured
+            val type = if (q.contains("seriesdetail")) "series" else "season"
             return listOf<Shelf>(Shelf.Item(loadPlaylist(Playlist(
-                "season:$mid:$sid", "视频合集", isEditable = false
+                "$type:$mid:$sid", "视频合集", isEditable = false
             )))).toFeed()
         }
         Regex("(?:space\\.bilibili\\.com/|^mid:)([0-9]+)").find(q)?.groupValues?.get(1)
@@ -345,9 +354,9 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, QuickSearchClient, Tr
     private fun favoriteFromRow(row: kotlinx.serialization.json.JsonObject): Playlist? {
         val id = row["id"].str().takeIf { it.matches(Regex("[0-9]+")) } ?: return null
         val mid = row["mid"].str()
-        val private = row["attr"].integer() and 1 != 0
+        val isPrivate = row["attr"].integer() and 1 != 0
         return Playlist("fav:$mid:$id", row["title"].str(),
-            isEditable = activeUser?.id == mid, isPrivate = private,
+            isEditable = activeUser?.id == mid, isPrivate = isPrivate,
             cover = image(row["cover"].str()), description = row["intro"].str(),
             trackCount = row["media_count"].number(), subtitle = "B 站收藏夹",
             isSaveable = false, isRadioSupported = false)
