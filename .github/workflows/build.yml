@@ -28,3 +28,32 @@ jobs:
         with:
           name: echo-bilibili-audio-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+
+  release:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: echo-bilibili-audio-apk
+          path: dist
+      - name: Publish APK to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^extVersion=//p' gradle.properties | head -n 1)"
+          test -n "$version"
+          if gh release view "$version" >/dev/null 2>&1; then
+            echo "Release $version already exists; increase extVersion for a new release."
+            exit 0
+          fi
+          asset="dist/echo-bilibili-audio-$version.apk"
+          mv dist/app-debug.apk "$asset"
+          gh release create "$version" "$asset" \
+            --title "Bilibili Audio $version" \
+            --notes "Echo Bilibili audio extension $version"

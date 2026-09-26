@@ -20,7 +20,17 @@ Install JDK 17 and Android SDK Platform 36 (set `ANDROID_HOME` or `ANDROID_SDK_R
 bash gradlew :ext:test :app:assembleDebug
 ```
 
-The Android extension package is `app/build/outputs/apk/debug/app-debug.apk`. Open it in Echo's **Add extension → From file** flow, or install it as an Android package and restart Echo. The `extensions` text code in Echo points to an existing third-party extension **list**; it does not accept source code or automatically discover this new extension. To distribute through a list, publish the built APK to your own GitHub Releases and add an item with `id=bilibili_audio` and your releases API URL to a JSON list hosted at an HTTPS URL; enter that list URL in Echo's Add extension screen. See `extension-list.example.json`.
+The Android extension package is `app/build/outputs/apk/debug/app-debug.apk`. Open it in Echo's **Add extension → From file** flow, or install it as an Android package and restart Echo.
+
+To install by URL, paste the following address in Echo's **Add extension → From link or code** field, then select **Bilibili Audio**:
+
+```text
+https://raw.githubusercontent.com/weijianxian/bilibili4echo/main/extensions.json
+```
+
+This file is a third-party extension list; the `extensions` text code in Echo points to a different list. On a push to `main`, GitHub Actions builds the APK and publishes it as a versioned GitHub Release. The list's `updateUrl` points to this repository's Releases API, which Echo uses to download the APK. Increase `extVersion` and `extVersionCode` in `gradle.properties` before publishing a subsequent version.
+
+This build uses Android's debug signing key. Installing a future build over it may require uninstalling the previous APK and then adding the extension again, because the CI signing key can change between builds.
 
 ## API mapping
 
@@ -41,4 +51,4 @@ The archive is from January 2026 and these endpoints may change. The app uses on
 
 The source's `app` module declares Echo's music extension manifest metadata; `ext` implements `ExtensionClient`, `HomeFeedClient`, `SearchFeedClient`, and `TrackClient`. The runtime host provides Echo `common`, OkHttp and Kotlin runtime. WBI keys refresh hourly and retry once when verification fails. A guest cookie is obtained through the site before signed search.
 
-Source is provided for local build. No APK is bundled unless a successful Android build has been performed.
+The latest APK is available on the repository's Releases page after the first successful push build.
