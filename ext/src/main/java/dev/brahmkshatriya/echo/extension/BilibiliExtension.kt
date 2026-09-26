@@ -105,7 +105,7 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, QuickSearchClient, Tr
         )
     )) + listOfNotNull(
         activeUser?.let { Shelf.Item(Artist(it.id, it.name, it.cover,
-            subtitle = "我的 B 站主页", isSaveable = false)) }
+            subtitle = "我的 B 站主页", isSaveable = false, isFollowable = false)) }
     )
 
     private fun discover(): Feed<Shelf> = homeHeader().toFeed()
@@ -196,7 +196,7 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, QuickSearchClient, Tr
             cover = image(profile["face"].str()) ?: artist.cover,
             bio = profile["sign"].str(),
             subtitle = "B 站 UP 主 · UID $mid",
-            isFollowable = true, isSaveable = false
+            isFollowable = activeUser?.id != mid, isSaveable = false
         )
     }
 
