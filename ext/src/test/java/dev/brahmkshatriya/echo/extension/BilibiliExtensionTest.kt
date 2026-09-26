@@ -1,7 +1,12 @@
 package dev.brahmkshatriya.echo.extension
 
 import dev.brahmkshatriya.echo.common.models.Artist
+import dev.brahmkshatriya.echo.common.models.Album
+import dev.brahmkshatriya.echo.common.models.Lyrics
+import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Shelf
+import dev.brahmkshatriya.echo.common.models.Track
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -51,5 +56,22 @@ class BilibiliExtensionTest {
 
         val moreCollections = extension.artistShelves(artist, null, collections)
         assertFalse(moreCollections.any { it.title == "全部投稿" })
+    }
+
+    @Test fun directShareLinksPreserveTheRightBilibiliIdentifier() = runBlocking {
+        assertEquals("https://www.bilibili.com/video/BV1XN411K7g9",
+            extension.onShare(Track("v:BV1XN411K7g9", "视频")))
+        assertEquals("https://www.bilibili.com/audio/am10624",
+            extension.onShare(Album("am:10624", "歌单")))
+        assertEquals("https://space.bilibili.com/42/favlist?fid=101",
+            extension.onShare(Playlist("fav:42:101", "收藏夹", isEditable = false)))
+    }
+
+    @Test fun lrcTimestampsUseMillisecondsAndEndAtTheNextLine() {
+        val parsed = extension.parseAudioLyrics("[ar:歌手]\n[00:02.5]第一句\n" +
+            "[00:03.025]第二句\n[01:00]结尾") as Lyrics.Timed
+        assertEquals(listOf("第一句", "第二句", "结尾"), parsed.list.map { it.text })
+        assertEquals(listOf(2500L, 3025L, 60000L), parsed.list.map { it.startTime })
+        assertEquals(3025L, parsed.list.first().endTime)
     }
 }

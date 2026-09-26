@@ -10,6 +10,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 import okhttp3.Cookie
+import okhttp3.FormBody
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -33,6 +34,15 @@ internal class BilibiliApi {
 
     internal fun setLoginCookies(header: String?) {
         loginCookies = normalizedCookies(header.orEmpty())
+    }
+
+    private fun csrf(): String {
+        require(loginCookies.split(';').any { it.trim().startsWith("SESSDATA=") }) {
+            "请先登录哔哩哔哩"
+        }
+        return loginCookies.split(';').firstOrNull { it.trim().startsWith("bili_jct=") }
+            ?.substringAfter('=')?.trim()?.takeIf { it.matches(Regex("[0-9a-fA-F]{32}")) }
+            ?: error("缺少登录验证信息 bili_jct，请重新登录")
     }
 
     /** CookieManager supplies a Cookie header; reject malformed names and header separators. */
@@ -75,12 +85,17 @@ internal class BilibiliApi {
 
     private suspend fun get(url: String, referer: String = "https://www.bilibili.com/",
                             authOverride: String? = null): JsonObject {
-        require(url.startsWith("https://api.bilibili.com/") || url.startsWith("https://www.bilibili.com/audio/"))
         val builder = Request.Builder().url(url)
-            .header("User-Agent", USER_AGENT)
+        val host = builder.build().url.host
+        require(builder.build().url.isHttps && (host == "api.bilibili.com" ||
+            host == "s.search.bilibili.com" ||
+            (host == "www.bilibili.com" && builder.build().url.encodedPath.startsWith("/audio/")) ||
+            host == "hdslb.com" || host.endsWith(".hdslb.com")))
+        builder.header("User-Agent", USER_AGENT)
             .header("Referer", referer)
             .header("Origin", "https://www.bilibili.com")
-        (authOverride ?: cookieHeader(builder.build().url)).takeIf { it.isNotEmpty() }
+        (authOverride ?: if (host == "hdslb.com" || host.endsWith(".hdslb.com")) ""
+            else cookieHeader(builder.build().url)).takeIf { it.isNotEmpty() }
             ?.let { builder.header("Cookie", it) }
         val request = builder.build()
         return client.newCall(request).await().use { response ->
@@ -88,6 +103,29 @@ internal class BilibiliApi {
             if (!response.isSuccessful) error("Bilibili HTTP ${response.code}")
             val body = response.body?.string() ?: error("Bilibili returned an empty response")
             json.parseToJsonElement(body).obj()
+        }
+    }
+
+    private suspend fun post(path: String, params: Map<String, String>): JsonObject {
+        require(path.startsWith('/') && !path.startsWith("//"))
+        val url = "https://api.bilibili.com$path"
+        val body = FormBody.Builder().apply {
+            (params + ("csrf" to csrf())).forEach { (name, value) -> add(name, value) }
+        }.build()
+        val builder = Request.Builder().url(url).post(body)
+            .header("User-Agent", USER_AGENT)
+            .header("Referer", "https://www.bilibili.com/")
+            .header("Origin", "https://www.bilibili.com")
+        cookieHeader(builder.build().url).takeIf { it.isNotEmpty() }
+            ?.let { builder.header("Cookie", it) }
+        return client.newCall(builder.build()).await().use { response ->
+            rememberCookies(response)
+            if (!response.isSuccessful) error("Bilibili HTTP ${response.code}")
+            val payload = json.parseToJsonElement(response.body?.string()
+                ?: error("Bilibili returned an empty response")).obj()
+            val code = payload["code"].integer()
+            if (code != 0) error("Bilibili API $code: ${payload["message"].str()}")
+            payload["data"].obj()
         }
     }
 
@@ -210,6 +248,126 @@ internal class BilibiliApi {
     suspend fun audioUrl(sid: String): JsonObject = data(
         "https://www.bilibili.com/audio/music-service-c/web/url?sid=$sid"
     )
+
+    suspend fun audioLyrics(sid: String): String {
+        val root = get("https://www.bilibili.com/audio/music-service-c/web/song/lyric?sid=$sid")
+        val code = root["code"].integer()
+        if (code != 0) error("Bilibili API $code: ${root["msg"].str()}")
+        return root["data"].str()
+    }
+
+    suspend fun audioMenu(sid: String): JsonObject = data(
+        "https://www.bilibili.com/audio/music-service-c/web/menu/info?sid=$sid"
+    )
+
+    suspend fun audioMenuSongs(sid: String, page: Int): JsonObject = data(
+        "https://www.bilibili.com/audio/music-service-c/web/song/of-menu?sid=$sid&pn=$page&ps=20"
+    )
+
+    suspend fun audioCollections(page: Int): JsonObject = data(
+        "https://www.bilibili.com/audio/music-service-c/web/collections/list?pn=$page&ps=20"
+    )
+
+    suspend fun watchLater(): JsonObject = data(
+        "https://api.bilibili.com/x/v2/history/toview"
+    )
+
+    suspend fun history(max: String = "0", viewAt: String = "0"): JsonObject = data(
+        "https://api.bilibili.com/x/web-interface/history/cursor?type=archive&ps=20" +
+            "&max=$max&business=archive&view_at=$viewAt"
+    )
+
+    suspend fun favoriteFolders(mid: String, rid: String? = null): JsonArray = data(
+        "https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=$mid" +
+            (rid?.let { "&type=2&rid=$it" } ?: "")
+    )["list"].array()
+
+    suspend fun favoriteFolder(mediaId: String): JsonObject = data(
+        "https://api.bilibili.com/x/v3/fav/folder/info?media_id=$mediaId"
+    )
+
+    suspend fun favoriteItems(mediaId: String, page: Int): JsonObject = data(
+        "https://api.bilibili.com/x/v3/fav/resource/list?media_id=$mediaId&pn=$page&ps=20"
+    )
+
+    suspend fun createdFolder(title: String, description: String?): JsonObject = post(
+        "/x/v3/fav/folder/add", mapOf("title" to title, "intro" to description.orEmpty(), "privacy" to "0")
+    )
+
+    suspend fun editFolder(mediaId: String, title: String, description: String?, private: Boolean) {
+        post("/x/v3/fav/folder/edit", mapOf("media_id" to mediaId, "title" to title,
+            "intro" to description.orEmpty(), "privacy" to if (private) "1" else "0"))
+    }
+
+    suspend fun deleteFolder(mediaId: String) {
+        post("/x/v3/fav/folder/del", mapOf("media_ids" to mediaId))
+    }
+
+    suspend fun favoriteVideo(aid: String, folderId: String, add: Boolean) {
+        post("/x/v3/fav/resource/deal", mapOf("rid" to aid, "type" to "2",
+            "add_media_ids" to if (add) folderId else "",
+            "del_media_ids" to if (add) "" else folderId))
+    }
+
+    suspend fun removeFavorites(folderId: String, resources: List<String>) {
+        if (resources.isNotEmpty()) post("/x/v3/fav/resource/batch-del", mapOf(
+            "media_id" to folderId, "resources" to resources.joinToString(",")
+        ))
+    }
+
+    suspend fun isVideoFavorite(bvid: String): Boolean = data(
+        "https://api.bilibili.com/x/v2/fav/video/favoured?aid=$bvid"
+    )["favoured"].str() == "true"
+
+    suspend fun likeVideo(bvid: String, shouldLike: Boolean) {
+        post("/x/web-interface/archive/like", mapOf("bvid" to bvid,
+            "like" to if (shouldLike) "1" else "2"))
+    }
+
+    suspend fun isVideoLiked(bvid: String): Boolean {
+        val root = get("https://api.bilibili.com/x/web-interface/archive/has/like?bvid=$bvid")
+        val code = root["code"].integer()
+        if (code != 0) error("Bilibili API $code: ${root["message"].str()}")
+        return root["data"].integer() == 1
+    }
+
+    suspend fun relation(mid: String): JsonObject = data(
+        "https://api.bilibili.com/x/relation?fid=$mid"
+    )
+
+    suspend fun followerCount(mid: String): Long = data(
+        "https://api.bilibili.com/x/relation/stat?vmid=$mid"
+    )["follower"].number()
+
+    suspend fun follow(mid: String, shouldFollow: Boolean) {
+        post("/x/relation/modify", mapOf("fid" to mid,
+            "act" to if (shouldFollow) "1" else "2", "re_src" to "11"))
+    }
+
+    suspend fun followings(mid: String, page: Int): JsonObject = data(
+        "https://api.bilibili.com/x/relation/followings?vmid=$mid&pn=$page&ps=50"
+    )
+
+    suspend fun related(bvid: String): JsonArray {
+        val root = get("https://api.bilibili.com/x/web-interface/archive/related?bvid=$bvid")
+        val code = root["code"].integer()
+        if (code != 0) error("Bilibili API $code: ${root["message"].str()}")
+        return root["data"].array()
+    }
+
+    suspend fun playerInfo(bvid: String, cid: String): JsonObject = signed(
+        "/x/player/wbi/v2", mapOf("bvid" to bvid, "cid" to cid)
+    )
+
+    suspend fun subtitle(url: String): JsonArray {
+        val normalized = if (url.startsWith("//")) "https:$url" else url
+        return get(normalized, authOverride = "")["body"].array()
+    }
+
+    suspend fun suggestions(query: String): JsonArray {
+        val root = get("https://s.search.bilibili.com/main/suggest?term=${percentEncode(query)}")
+        return root["result"].obj()["tag"].array()
+    }
 
     companion object {
         const val USER_AGENT = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
