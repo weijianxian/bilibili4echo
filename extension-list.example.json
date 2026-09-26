@@ -1,0 +1,9 @@
+[
+  {
+    "id": "bilibili_audio",
+    "name": "Bilibili Audio",
+    "subtitle": "Bilibili video soundtracks and au links",
+    "iconUrl": "",
+    "updateUrl": "https://api.github.com/repos/weijianxian/bilibili4echo/releases"
+  }
+]
