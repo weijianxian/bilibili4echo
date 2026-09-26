@@ -1,41 +1,102 @@
 package dev.brahmkshatriya.echo.extension
 
 import dev.brahmkshatriya.echo.common.clients.ExtensionClient
+import dev.brahmkshatriya.echo.common.clients.ArtistClient
 import dev.brahmkshatriya.echo.common.clients.HomeFeedClient
+import dev.brahmkshatriya.echo.common.clients.LoginClient
+import dev.brahmkshatriya.echo.common.clients.PlaylistClient
 import dev.brahmkshatriya.echo.common.clients.SearchFeedClient
 import dev.brahmkshatriya.echo.common.clients.TrackClient
 import dev.brahmkshatriya.echo.common.helpers.Page
 import dev.brahmkshatriya.echo.common.helpers.PagedData
+import dev.brahmkshatriya.echo.common.helpers.WebViewRequest
 import dev.brahmkshatriya.echo.common.models.Artist
 import dev.brahmkshatriya.echo.common.models.Feed
 import dev.brahmkshatriya.echo.common.models.Feed.Companion.toFeed
 import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
 import dev.brahmkshatriya.echo.common.models.NetworkRequest
+import dev.brahmkshatriya.echo.common.models.NetworkRequest.Companion.toGetRequest
+import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Streamable
 import dev.brahmkshatriya.echo.common.models.Track
+import dev.brahmkshatriya.echo.common.models.User
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.Settings
 
 /** Echo music extension: Bilibili video soundtracks and legacy au audio entries. */
-class BilibiliExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, TrackClient {
+class BilibiliExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, TrackClient,
+    LoginClient.WebView, ArtistClient, PlaylistClient {
     private val api = BilibiliApi()
+    private var activeUser: User? = null
+
+    override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {
+        override val initialUrl = "https://passport.bilibili.com/login".toGetRequest()
+        override val stopUrlRegex = Regex("^https://www\\.bilibili\\.com/(?:\\?.*)?$")
+
+        override suspend fun onStop(url: NetworkRequest, cookie: String): List<User> {
+            val account = api.currentAccount(cookie)
+            return listOf(User(
+                id = account["mid"].str(), name = account["uname"].str(),
+                cover = image(account["face"].str()),
+                extras = mapOf("cookie" to api.normalizedCookies(cookie))
+            ))
+        }
+    }
+
+    override fun setLoginUser(user: User?) {
+        activeUser = user
+        api.setLoginCookies(user?.extras?.get("cookie"))
+    }
+
+    override suspend fun getCurrentUser(): User? = activeUser?.copy(extras = emptyMap())
 
     override fun setSettings(settings: Settings) = Unit
     override suspend fun getSettingItems(): List<Setting> = emptyList()
 
     override suspend fun loadHomeFeed(): Feed<Shelf> = discover()
 
-    private fun discover(): Feed<Shelf> = listOf<Shelf>(
-        Shelf.Category("music", "音乐", search("音乐")),
-        Shelf.Category("cover", "翻唱", search("翻唱")),
-        Shelf.Category("instrumental", "演奏", search("演奏")),
-        Shelf.Category("vocaloid", "VOCALOID", search("VOCALOID"))
-    ).toFeed()
+    private fun discover(): Feed<Shelf> = (listOfNotNull<Shelf>(
+        activeUser?.let { Shelf.Item(Artist(it.id, it.name, it.cover, subtitle = "我的 B 站主页")) }
+    ) + listOf<Shelf>(
+        Shelf.Category("region:3", "音乐", regionFeed(3)),
+        Shelf.Category("region:28", "原创音乐", regionFeed(28)),
+        Shelf.Category("region:31", "翻唱", regionFeed(31)),
+        Shelf.Category("region:59", "演奏", regionFeed(59)),
+        Shelf.Category("region:30", "VOCALOID", regionFeed(30)),
+        Shelf.Category("region:267", "电台", regionFeed(267)),
+        Shelf.Category("region:36", "知识", regionFeed(36)),
+        Shelf.Category("region:188", "科技", regionFeed(188))
+    )).toFeed()
+
+    private fun regionFeed(rid: Int): Feed<Shelf> = PagedData.Continuous<Shelf> { cursor ->
+        val page = (cursor?.toIntOrNull() ?: 1).coerceAtLeast(1)
+        val result = api.region(rid, page)
+        val items = result["archives"].array().mapNotNull { row ->
+            val video = row.obj()
+            val owner = video["owner"].obj()
+            val artist = Artist(owner["mid"].str(), owner["name"].str(),
+                image(owner["face"].str()), isFollowable = false)
+            uploadTrack(video, artist)?.let(::Shelf.Item)
+        }
+        val total = result["page"].obj()["count"].number()
+        Page<Shelf>(items, if (items.isNotEmpty() && page * 30 < total)
+            (page + 1).toString() else null)
+    }.toFeed()
 
     override suspend fun loadSearchFeed(query: String): Feed<Shelf> {
         val q = query.trim()
         if (q.isEmpty()) return discover()
+        val collectionUrl = Regex("space\\.bilibili\\.com/([0-9]+)/.*[?&]sid=([0-9]+)")
+            .find(q)
+        if (collectionUrl != null) {
+            val (mid, sid) = collectionUrl.destructured
+            return listOf<Shelf>(Shelf.Item(loadPlaylist(Playlist(
+                "season:$mid:$sid", "视频合集", isEditable = false
+            )))).toFeed()
+        }
+        Regex("(?:space\\.bilibili\\.com/|^mid:)([0-9]+)").find(q)?.groupValues?.get(1)
+            ?.let { return listOf<Shelf>(Shelf.Item(loadArtist(Artist(it, "UP 主")))).toFeed() }
         val au = Regex("(?:^|[/\\s])(?:au)([0-9]+)(?:$|[?/#\\s])", RegexOption.IGNORE_CASE)
             .find(q)?.groupValues?.get(1)
         if (au != null) return listOf<Shelf>(Shelf.Item(audioTrack(api.audioInfo(au)))).toFeed()
@@ -49,7 +110,10 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Tra
             val page = Regex("[?&]p=([0-9]+)").find(q)?.groupValues?.get(1)?.toIntOrNull() ?: 1
             val pages = detail["pages"].array()
             val selected = pages.getOrNull(page - 1)?.obj() ?: pages.firstOrNull()?.obj()
-            return listOf<Shelf>(Shelf.Item(videoTrack(detail, selected, bvid))).toFeed()
+            return listOfNotNull<Shelf>(
+                Shelf.Item(videoTrack(detail, selected, bvid)),
+                collectionFromVideo(detail)?.let { Shelf.Item(it) }
+            ).toFeed()
         }
         return search(q)
     }
@@ -75,6 +139,145 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Tra
         val totalPages = result["numPages"].integer().coerceAtMost(50)
         Page(tracks, if (tracks.isNotEmpty() && page < totalPages) (page + 1).toString() else null)
     }.toFeed()
+
+    override suspend fun loadArtist(artist: Artist): Artist {
+        val mid = validId(artist.id)
+        val profile = api.userInfo(mid)
+        return artist.copy(
+            name = profile["name"].str().ifBlank { artist.name },
+            cover = image(profile["face"].str()) ?: artist.cover,
+            bio = profile["sign"].str(),
+            subtitle = "B 站 UP 主 · UID $mid",
+            isFollowable = false, isSaveable = false
+        )
+    }
+
+    override suspend fun loadFeed(artist: Artist): Feed<Shelf> {
+        val mid = validId(artist.id)
+        return PagedData.Continuous<Shelf> { cursor ->
+            val page = (cursor?.toIntOrNull() ?: 1).coerceAtLeast(1)
+            val shelves = mutableListOf<Shelf>()
+            if (page == 1) {
+                val collections = api.userCollections(mid, 1)
+                val playlists = collectionItems(collections)
+                if (playlists.isNotEmpty()) shelves += Shelf.Lists.Categories(
+                    id = "collections:$mid", title = "合集与列表",
+                    list = playlists.map { playlist ->
+                        Shelf.Category(playlist.id, playlist.title,
+                            listOf<Shelf>(Shelf.Item(playlist)).toFeed(),
+                            image = playlist.cover)
+                    }, more = collectionFeed(mid)
+                )
+            }
+            val uploads = api.userVideos(mid, page)
+            val videos = uploads["list"].obj()["vlist"].array()
+                .mapNotNull { uploadTrack(it.obj(), artist) }
+            if (videos.isNotEmpty()) shelves += Shelf.Lists.Tracks(
+                id = "uploads:$mid:$page", title = if (page == 1) "最新投稿" else "更多投稿",
+                list = videos, more = if (page == 1) uploadFeed(mid, artist) else null
+            )
+            val count = uploads["page"].obj()["count"].number()
+            Page(shelves, if (videos.isNotEmpty() && page * 30 < count) (page + 1).toString() else null)
+        }.toFeed()
+    }
+
+    private fun uploadFeed(mid: String, artist: Artist): Feed<Shelf> =
+        PagedData.Continuous<Shelf> { cursor ->
+            val page = (cursor?.toIntOrNull() ?: 1).coerceAtLeast(1)
+            val data = api.userVideos(mid, page)
+            val items = data["list"].obj()["vlist"].array().mapNotNull {
+                uploadTrack(it.obj(), artist)?.let(::Shelf.Item)
+            }
+            val count = data["page"].obj()["count"].number()
+            Page(items, if (items.isNotEmpty() && page * 30 < count) (page + 1).toString() else null)
+        }.toFeed()
+
+    private fun collectionFeed(mid: String): Feed<Shelf> =
+        PagedData.Continuous<Shelf> { cursor ->
+            val page = (cursor?.toIntOrNull() ?: 1).coerceAtLeast(1)
+            val data = api.userCollections(mid, page)
+            val items = collectionItems(data).map(::Shelf.Item)
+            val total = data["page"].obj()["total"].integer()
+            Page(items, if (items.isNotEmpty() && page * 20 < total) (page + 1).toString() else null)
+        }.toFeed()
+
+    private fun collectionItems(data: kotlinx.serialization.json.JsonObject): List<Playlist> =
+        listOf("seasons_list" to "season", "series_list" to "series").flatMap { (key, type) ->
+            data[key].array().mapNotNull { item ->
+                val meta = item.obj()["meta"].obj()
+                playlistFromMeta(meta, type)
+            }
+        }
+
+    private fun playlistFromMeta(meta: kotlinx.serialization.json.JsonObject, type: String): Playlist? {
+        val mid = meta["mid"].str().takeIf { it.all(Char::isDigit) && it.isNotEmpty() } ?: return null
+        val id = meta[if (type == "season") "season_id" else "series_id"].str()
+            .takeIf { it.all(Char::isDigit) && it.isNotEmpty() } ?: return null
+        return Playlist(
+            id = "$type:$mid:$id", title = meta["name"].str().ifBlank { "视频合集" },
+            isEditable = false, isPrivate = false, cover = image(meta["cover"].str()),
+            description = meta["description"].str(), trackCount = meta["total"].number(),
+            subtitle = if (type == "season") "B 站视频合集" else "B 站视频列表",
+            isSaveable = false, isRadioSupported = false
+        )
+    }
+
+    private fun collectionFromVideo(detail: kotlinx.serialization.json.JsonObject): Playlist? {
+        val season = detail["ugc_season"].obj()
+        val mid = season["mid"].str().ifBlank { detail["owner"].obj()["mid"].str() }
+        val id = season["id"].str()
+        if (!mid.matches(Regex("[0-9]+")) || !id.matches(Regex("[0-9]+"))) return null
+        return Playlist("season:$mid:$id", season["title"].str(), isEditable = false,
+            isPrivate = false, cover = image(season["cover"].str()),
+            description = season["intro"].str(), isSaveable = false)
+    }
+
+    private fun uploadTrack(row: kotlinx.serialization.json.JsonObject, artist: Artist): Track? {
+        val bvid = row["bvid"].str().takeIf { it.matches(Regex("BV[0-9A-Za-z]{10}")) }
+            ?: return null
+        return Track("v:$bvid", cleanTitle(row["title"].str()), Track.Type.Song,
+            cover = image(row["pic"].str()), artists = listOf(artist),
+            duration = row["length"].str().let(::parseDuration)
+                ?: row["duration"].number().takeIf { it > 0 }?.times(1000),
+            description = row["description"].str(), subtitle = "B 站视频音轨",
+            isSaveable = false, isLikeable = false, isHideable = false,
+            isRadioSupported = false)
+    }
+
+    private fun validId(value: String): String {
+        require(value.matches(Regex("[0-9]+"))) { "Invalid Bilibili ID" }
+        return value
+    }
+
+    private fun playlistParts(playlist: Playlist): Triple<String, String, String> {
+        val parts = playlist.id.split(':')
+        require(parts.size == 3 && parts[0] in listOf("season", "series")) {
+            "Unsupported Bilibili collection"
+        }
+        return Triple(parts[0], validId(parts[1]), validId(parts[2]))
+    }
+
+    override suspend fun loadPlaylist(playlist: Playlist): Playlist {
+        val (type, mid, id) = playlistParts(playlist)
+        val meta = if (type == "season") api.collection(mid, id, 1)["meta"].obj()
+                   else api.seriesInfo(id)
+        return playlistFromMeta(meta, type) ?: playlist
+    }
+
+    override suspend fun loadTracks(playlist: Playlist): Feed<Track> {
+        val (type, mid, id) = playlistParts(playlist)
+        val artist = playlist.authors.firstOrNull() ?: Artist(mid, "UP 主", isFollowable = false)
+        return PagedData.Continuous<Track> { cursor ->
+            val page = (cursor?.toIntOrNull() ?: 1).coerceAtLeast(1)
+            val data = if (type == "season") api.collection(mid, id, page)
+                       else api.series(mid, id, page)
+            val items = data["archives"].array().mapNotNull { uploadTrack(it.obj(), artist) }
+            val total = data["page"].obj()["total"].number()
+            Page(items, if (items.isNotEmpty() && page * 30 < total) (page + 1).toString() else null)
+        }.toFeed()
+    }
+
+    override suspend fun loadFeed(playlist: Playlist): Feed<Shelf>? = null
 
     override suspend fun loadTrack(track: Track, isDownload: Boolean): Track {
         return when {
@@ -142,10 +345,12 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, SearchFeedClient, Tra
         val bvid = track.id.split(':').getOrNull(1) ?: return null
         val detail = api.view(bvid)
         val pages = detail["pages"].array()
-        if (pages.size <= 1) return null
-        return listOf<Shelf>(Shelf.Lists.Tracks(
+        val shelves = mutableListOf<Shelf>()
+        collectionFromVideo(detail)?.let { shelves += Shelf.Item(it) }
+        if (pages.size > 1) shelves += Shelf.Lists.Tracks(
             id = "parts:$bvid", title = "分 P", list = pages.map { videoTrack(detail, it.obj(), bvid) }
-        )).toFeed()
+        )
+        return shelves.takeIf { it.isNotEmpty() }?.toFeed()
     }
 
     private fun videoTrack(detail: kotlinx.serialization.json.JsonObject,

@@ -29,19 +29,39 @@ internal class BilibiliApi {
     // Supplying a custom CookieJar that returns an ArrayList crashes its dispatcher.
     // Keep guest cookies here and attach them as request headers instead.
     private val cookies = mutableMapOf<String, Cookie>()
+    @Volatile private var loginCookies: String = ""
+
+    internal fun setLoginCookies(header: String?) {
+        loginCookies = normalizedCookies(header.orEmpty())
+    }
+
+    /** CookieManager supplies a Cookie header; reject malformed names and header separators. */
+    internal fun normalizedCookies(header: String): String = header.split(';').mapNotNull { pair ->
+        val name = pair.substringBefore('=').trim()
+        val value = pair.substringAfter('=', "").trim()
+        if (name.matches(Regex("[A-Za-z0-9_]+")) && value.isNotEmpty() &&
+            value.none { it == '\r' || it == '\n' || it == ';' }) "$name=$value" else null
+    }.joinToString("; ")
 
     internal fun rememberCookies(response: Response) {
         val received = Cookie.parseAll(response.request.url, response.headers)
         synchronized(cookies) {
-            received.forEach { cookies["${it.domain}|${it.name}"] = it }
+            received.filter { it.name in setOf("buvid3", "buvid4", "b_nut", "_uuid") }
+                .forEach { cookies["${it.domain}|${it.name}"] = it }
         }
     }
 
     internal fun cookieHeader(url: HttpUrl): String = synchronized(cookies) {
+        if (url.host != "bilibili.com" && !url.host.endsWith(".bilibili.com"))
+            return@synchronized ""
         val now = System.currentTimeMillis()
         cookies.entries.removeAll { it.value.expiresAt < now }
-        cookies.values.filter { it.matches(url) }
-            .joinToString("; ") { "${it.name}=${it.value}" }
+        val pairs = cookies.values.filter { it.matches(url) }
+            .associate { it.name to it.value }.toMutableMap()
+        loginCookies.split(';').map { it.trim() }.filter { it.contains('=') }.forEach {
+            pairs[it.substringBefore('=')] = it.substringAfter('=')
+        }
+        pairs.entries.joinToString("; ") { "${it.key}=${it.value}" }
     }
 
     private val client = OkHttpClient.Builder()
@@ -53,13 +73,14 @@ internal class BilibiliApi {
     private var keyFetchedAt = 0L
     private var seeded = false
 
-    private suspend fun get(url: String, referer: String = "https://www.bilibili.com/"): JsonObject {
+    private suspend fun get(url: String, referer: String = "https://www.bilibili.com/",
+                            authOverride: String? = null): JsonObject {
         require(url.startsWith("https://api.bilibili.com/") || url.startsWith("https://www.bilibili.com/audio/"))
         val builder = Request.Builder().url(url)
             .header("User-Agent", USER_AGENT)
             .header("Referer", referer)
             .header("Origin", "https://www.bilibili.com")
-        cookieHeader(builder.build().url).takeIf { it.isNotEmpty() }
+        (authOverride ?: cookieHeader(builder.build().url)).takeIf { it.isNotEmpty() }
             ?.let { builder.header("Cookie", it) }
         val request = builder.build()
         return client.newCall(request).await().use { response ->
@@ -77,6 +98,19 @@ internal class BilibiliApi {
         val value = response["data"].obj()
         if (value.isEmpty() || value["v_voucher"] != null) error("Bilibili requires additional verification")
         return value
+    }
+
+    suspend fun currentAccount(cookie: String): JsonObject {
+        val session = normalizedCookies(cookie)
+        require(session.split(';').any { it.trim().startsWith("SESSDATA=") }) {
+            "登录尚未完成，请在网页中完成哔哩哔哩登录"
+        }
+        // Echo has not selected the account yet, so validate this candidate cookie alone.
+        val response = get("https://api.bilibili.com/x/web-interface/nav", authOverride = session)
+        require(response["code"].integer() == 0 && response["data"].obj()["isLogin"].str() == "true") {
+            "哔哩哔哩会话无效，请重新登录"
+        }
+        return response["data"].obj()
     }
 
     private suspend fun seedCookies() {
@@ -126,6 +160,38 @@ internal class BilibiliApi {
         "/x/web-interface/wbi/search/type",
         mapOf("search_type" to "video", "keyword" to keyword, "page" to page.toString())
     )
+
+    suspend fun userInfo(mid: String): JsonObject = signed(
+        "/x/space/wbi/acc/info", mapOf("mid" to mid)
+    )
+
+    suspend fun region(rid: Int, page: Int): JsonObject = data(
+        "https://api.bilibili.com/x/web-interface/dynamic/region?rid=$rid&pn=$page&ps=30"
+    )
+
+    suspend fun userVideos(mid: String, page: Int): JsonObject = signed(
+        "/x/space/wbi/arc/search", mapOf("mid" to mid, "pn" to page.toString(),
+            "ps" to "30", "order" to "pubdate")
+    )
+
+    suspend fun userCollections(mid: String, page: Int): JsonObject = data(
+        "https://api.bilibili.com/x/polymer/web-space/seasons_series_list" +
+            "?mid=$mid&page_num=$page&page_size=20"
+    )["items_lists"].obj()
+
+    suspend fun collection(mid: String, seasonId: String, page: Int): JsonObject = data(
+        "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list" +
+            "?mid=$mid&season_id=$seasonId&page_num=$page&page_size=30"
+    )
+
+    suspend fun series(mid: String, seriesId: String, page: Int): JsonObject = data(
+        "https://api.bilibili.com/x/series/archives" +
+            "?mid=$mid&series_id=$seriesId&only_normal=true&sort=desc&pn=$page&ps=30"
+    )
+
+    suspend fun seriesInfo(seriesId: String): JsonObject = data(
+        "https://api.bilibili.com/x/series/series?series_id=$seriesId"
+    )["meta"].obj()
 
     suspend fun view(bvid: String? = null, aid: String? = null): JsonObject {
         val query = if (bvid != null) "bvid=$bvid" else "aid=${aid ?: error("Missing video ID")}" 

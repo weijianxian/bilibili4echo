@@ -28,6 +28,16 @@ class BilibiliApiTest {
         assertEquals("", api.cookieHeader("https://example.com/".toHttpUrl()))
     }
 
+    @Test fun loginCookiesOnlyReachBilibiliAndAreClearedOnLogout() {
+        val api = BilibiliApi()
+        api.setLoginCookies("SESSDATA=account; DedeUserID=42; bad name=ignored; injected=x\r\nHeader:evil")
+        assertEquals("SESSDATA=account; DedeUserID=42",
+            api.cookieHeader("https://api.bilibili.com/x/web-interface/nav".toHttpUrl()))
+        assertEquals("", api.cookieHeader("https://notbilibili.com/".toHttpUrl()))
+        api.setLoginCookies(null)
+        assertEquals("", api.cookieHeader("https://api.bilibili.com/".toHttpUrl()))
+    }
+
     @Test fun documentedWbiSignature() {
         val raw = "7cd084941338484aae1ad9425b84077c" +
             "4932caff0ff746eab6f01bf08b70ac45"

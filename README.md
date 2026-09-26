@@ -7,10 +7,13 @@ An independent **music extension APK** for the Android version of [Echo](https:/
 - Search Bilibili videos, page through results, and play the audio-only DASH streams.
 - Paste a BV link/ID, `av` ID, or `au` audio link/ID into Echo's search box.
 - Display video parts in a track's detail feed; pick a part to play its own CID.
-- Open four music-oriented search categories from the home feed.
+- Browse music, vocaloid, radio, knowledge, and technology sections from the home feed.
+- Sign in through Echo's Bilibili WebView; open your own creator profile from the home feed.
+- Open other creators through their space URL or `mid:<UID>` and browse paged uploads and collections.
+- Open Bilibili video collections and series as Echo playlists, with paged audio tracks.
 - Fetch a fresh stream URL for each playback resolution; URLs are short lived.
 
-Only playback that Bilibili allows to a guest is supported. Paid, region-restricted, login-only or unavailable items can return an error or a preview. This extension does not request credentials, persist cookies across launches, or bypass account restrictions. Search can also be affected by Bilibili verification/rate limits.
+Paid, region-restricted, or unavailable items may still return an error or a preview. Bilibili verification and rate limits may affect search and browsing. Echo stores the WebView session cookie with the selected extension account so the login survives an app restart; logging out clears it from the active network client. The extension never asks for a password or sends session cookies to playback CDNs or other extensions.
 
 ## Build and install
 
@@ -34,7 +37,7 @@ This build uses Android's debug signing key. Installing a future build over it m
 
 ## API mapping
 
-The user-provided archived Bilibili API collect documents were consulted for the following requests:
+The user-provided January 2026 archive contains the project's closure notice but no API documentation. Available archived documentation from the same API collect project and Echo's source were consulted for these requests:
 
 | Feature | Endpoint |
 | --- | --- |
@@ -44,11 +47,15 @@ The user-provided archived Bilibili API collect documents were consulted for the
 | Video audio | `GET api.bilibili.com/x/player/wbi/playurl` (`fnval=16`, DASH audio) |
 | au details | `GET www.bilibili.com/audio/music-service-c/web/song/info` |
 | au stream | `GET www.bilibili.com/audio/music-service-c/web/url` |
+| WebView login check | `GET api.bilibili.com/x/web-interface/nav` |
+| Creator profile and uploads | `GET api.bilibili.com/x/space/wbi/acc/info`, `/x/space/wbi/arc/search` |
+| Creator collections and series | `GET api.bilibili.com/x/polymer/web-space/seasons_series_list`, `/x/polymer/web-space/seasons_archives_list`, `/x/series/archives` |
+| Home sections | `GET api.bilibili.com/x/web-interface/dynamic/region` |
 
 The archive is from January 2026 and these endpoints may change. The app uses only video audio streams, never a video container. It does not include or redistribute the API archive.
 
 ## Implementation notes
 
-The source's `app` module declares Echo's music extension manifest metadata; `ext` implements `ExtensionClient`, `HomeFeedClient`, `SearchFeedClient`, and `TrackClient`. The runtime host provides Echo `common`, OkHttp and Kotlin runtime. WBI keys refresh hourly and retry once when verification fails. A guest cookie is obtained through the site before signed search.
+The source's `app` module declares Echo's music extension manifest metadata; `ext` implements Echo's home, search, track, creator, playlist and WebView login clients. The runtime host provides Echo `common`, OkHttp and Kotlin runtime. WBI keys refresh hourly and retry once when verification fails. A guest cookie is obtained through the site before signed search. Cookies are attached manually as headers because Echo nightly's minified OkHttp crashes with a nondefault CookieJar.
 
 The latest APK is available on the repository's Releases page after the first successful push build.
