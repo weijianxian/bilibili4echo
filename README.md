@@ -17,6 +17,9 @@ An independent **music extension APK** for the Android version of [Echo](https:/
 - Play related-video radio, browse related tracks on a video's page, see video chapters, view available video subtitles as timed captions, and read legacy au song lyrics.
 - Paste a legacy Bilibili audio `am` song list link into search to browse its tracks. Echo's search box also offers live Bilibili keyword suggestions.
 - Fetch a fresh stream URL for each playback resolution; URLs are short lived.
+- Optional Bilibili SponsorBlock (小电视空降助手) integration: the extension setting is off by default. When enabled, it fetches only the `sponsor` category for the current video part and returns `SKIP` chapters for actual skip actions. No Bilibili login cookie is sent to the service; the request uses a SHA-256 BV prefix and filters the returned video/CID locally.
+
+**Host limitation:** Echo's published source currently defines chapter skipping in its extension model but does not call `TrackChapterClient.getChapters` or seek on `Chapter.SkipType.SKIP`. The setting supplies the segments to hosts that implement this contract; it cannot force the current Echo player to auto-seek. Actual automatic skipping requires Echo to support this chapter API. The extension does not alter audio streams to cut out segments.
 
 Paid, region-restricted, or unavailable items may still return an error or a preview. Bilibili verification and rate limits may affect search and browsing. Echo stores the WebView session cookie with the selected extension account so the login survives an app restart; logging out clears it from the active network client. The extension never asks for a password or sends session cookies to playback CDNs or other extensions.
 
@@ -66,6 +69,7 @@ The user-provided January 2026 archive contains the project's closure notice but
 | Legacy audio song lists and lyrics | `GET www.bilibili.com/audio/music-service-c/web/{menu/info,song/of-menu,collections/list,song/lyric}` |
 | Watch later and history | `GET api.bilibili.com/x/v2/history/toview`, `/x/web-interface/history/cursor` |
 | Search suggestions | `GET s.search.bilibili.com/main/suggest` |
+| Optional ad annotations | `GET bsbsb.top/api/skipSegments/{SHA-256 BV prefix}?category=sponsor` (no login cookie) |
 
 The archive is from January 2026 and these endpoints may change. The app uses only video audio streams, never a video container. It does not include or redistribute the API archive.
 

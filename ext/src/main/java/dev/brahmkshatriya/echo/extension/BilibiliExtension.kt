@@ -41,6 +41,7 @@ import dev.brahmkshatriya.echo.common.models.Tab
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.User
 import dev.brahmkshatriya.echo.common.settings.Setting
+import dev.brahmkshatriya.echo.common.settings.SettingSwitch
 import dev.brahmkshatriya.echo.common.settings.Settings
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonArray
@@ -51,7 +52,16 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, QuickSearchClient, Tr
     LoginClient.WebView, ArtistClient, AlbumClient, PlaylistEditPrivacyClient, LibraryFeedClient, LikeClient,
     FollowClient, SaveClient, LyricsClient, RadioClient, ShareClient, TrackChapterClient {
     private val api = BilibiliApi()
+    private val sponsorBlock = BilibiliSponsorBlock()
     private var activeUser: User? = null
+    private var settings: Settings? = null
+
+    private val skipSponsoredSegments: Boolean
+        get() = settings?.getBoolean(SKIP_SPONSORS) == true
+
+    private companion object {
+        const val SKIP_SPONSORS = "sponsorblock_skip_sponsor"
+    }
 
     override val webViewRequest = object : WebViewRequest.Cookie<List<User>> {
         override val initialUrl = "https://passport.bilibili.com/login".toGetRequest()
@@ -74,8 +84,12 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, QuickSearchClient, Tr
 
     override suspend fun getCurrentUser(): User? = activeUser?.copy(extras = emptyMap())
 
-    override fun setSettings(settings: Settings) = Unit
-    override suspend fun getSettingItems(): List<Setting> = emptyList()
+    override fun setSettings(settings: Settings) { this.settings = settings }
+    override suspend fun getSettingItems(): List<Setting> = listOf(SettingSwitch(
+        "空降助手：跳过广告", SKIP_SPONSORS,
+        "默认关闭；仅获取恰饭广告片段，不跳过片头、片尾或一键三连。需要 Echo 支持自动跳过章节。",
+        defaultValue = false
+    ))
 
     override suspend fun loadHomeFeed(): Feed<Shelf> = PagedData.Continuous<Shelf> { cursor ->
         val page = (cursor?.toIntOrNull() ?: 1).coerceAtLeast(1)
@@ -821,14 +835,29 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, QuickSearchClient, Tr
     override suspend fun getChapters(track: Track): List<Chapter> {
         if (!track.id.startsWith("v:")) return emptyList()
         val (bvid, cid) = videoCid(track)
-        return api.playerInfo(bvid, cid)["view_points"].array().mapNotNull { element ->
-            val row = element.obj()
-            val start = row["from"].str().toDoubleOrNull()
-            val end = row["to"].str().toDoubleOrNull()
-            val title = row["content"].str()
-            if (start == null || title.isBlank()) null
-            else Chapter(title, (start * 1000).toLong(), end?.let { (it * 1000).toLong() })
-        }
+        val native = try {
+            api.playerInfo(bvid, cid)["view_points"].array().mapNotNull { element ->
+                val row = element.obj()
+                val start = row["from"].str().toDoubleOrNull()
+                val end = row["to"].str().toDoubleOrNull()
+                val title = row["content"].str()
+                if (start == null || title.isBlank()) null
+                else Chapter(title, (start * 1000).toLong(), end?.let { (it * 1000).toLong() })
+            }
+        } catch (cancelled: CancellationException) { throw cancelled }
+          catch (_: Exception) { emptyList() }
+        if (!skipSponsoredSegments) return native
+        val duration = try {
+            val detail = api.view(bvid)
+            detail["pages"].array().firstOrNull { it.obj()["cid"].str() == cid }
+                ?.obj()?.get("duration").number().takeIf { it > 0 }?.times(1000)
+        } catch (cancelled: CancellationException) { throw cancelled }
+          catch (_: Exception) { null }
+        val ads = try {
+            sponsorBlock.adChapters(bvid, cid, duration ?: track.duration)
+        } catch (cancelled: CancellationException) { throw cancelled }
+          catch (_: Exception) { emptyList() }
+        return (native + ads).sortedBy { it.startTime }
     }
 
     private fun videoTrack(detail: kotlinx.serialization.json.JsonObject,
