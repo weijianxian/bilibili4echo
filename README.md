@@ -40,7 +40,7 @@ https://raw.githubusercontent.com/weijianxian/bilibili4echo/main/extensions.json
 
 This file is a third-party extension list; the `extensions` text code in Echo points to a different list. On a push to `main`, GitHub Actions builds the APK and publishes it as a versioned GitHub Release. The list's `updateUrl` points to this repository's Releases API, which Echo uses to download the APK. Increase `extVersion` and `extVersionCode` in `gradle.properties` before publishing a subsequent version.
 
-This build uses Android's debug signing key. Installing a future build over it may require uninstalling the previous APK and then adding the extension again, because the CI signing key can change between builds.
+Echo's **From file / From link** installation keeps the extension inside Echo, so an updated extension can replace the previous one there. If you instead install the APK as an Android app, CI uses a new debug signing key on each build; Android may require you to uninstall the previous APK before installing the new one.
 
 ## API mapping
 

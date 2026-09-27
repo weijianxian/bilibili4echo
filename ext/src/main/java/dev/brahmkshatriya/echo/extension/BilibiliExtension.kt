@@ -42,6 +42,9 @@ import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.models.User
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.Settings
+import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 
 /** Echo music extension: Bilibili video soundtracks and legacy au audio entries. */
 class BilibiliExtension : ExtensionClient, HomeFeedClient, QuickSearchClient, TrackClient,
@@ -664,13 +667,22 @@ class BilibiliExtension : ExtensionClient, HomeFeedClient, QuickSearchClient, Tr
         if (!track.id.startsWith("v:")) return null
         val bvid = track.id.split(':').getOrNull(1) ?: return null
         val detail = api.view(bvid)
+        return trackFeed(bvid, detail) { api.related(bvid) }
+    }
+
+    internal suspend fun trackFeed(bvid: String, detail: JsonObject,
+                                   relatedLoader: suspend () -> JsonArray): Feed<Shelf>? {
         val pages = detail["pages"].array()
         val shelves = mutableListOf<Shelf>()
         collectionFromVideo(detail)?.let { shelves += Shelf.Item(it) }
         if (pages.size > 1) shelves += Shelf.Lists.Tracks(
             id = "parts:$bvid", title = "分 P", list = pages.map { videoTrack(detail, it.obj(), bvid) }
         )
-        val related = api.related(bvid).mapNotNull { row ->
+        // A recommendation failure must not hide playable parts or the parent collection.
+        val relatedRows = try { relatedLoader() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { JsonArray(emptyList()) }
+        val related = relatedRows.mapNotNull { row ->
             val video = row.obj()
             val owner = video["owner"].obj()
             uploadTrack(video, Artist(owner["mid"].str(), owner["name"].str(),

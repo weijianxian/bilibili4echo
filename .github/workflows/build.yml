@@ -50,10 +50,10 @@ jobs:
           test -n "$version"
           if gh release view "$version" >/dev/null 2>&1; then
             echo "Release $version already exists; increase extVersion for a new release."
-            exit 0
+            exit 1
           fi
           asset="dist/echo-bilibili-audio-$version.apk"
           mv dist/app-debug.apk "$asset"
           gh release create "$version" "$asset" \
-            --title "Bilibili Audio $version" \
-            --notes "Echo Bilibili audio extension $version"
+            --title "Bilibili Audio $version Stable" \
+            --notes-file RELEASE_NOTES.md --latest

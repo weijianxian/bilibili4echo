@@ -6,6 +6,7 @@ import dev.brahmkshatriya.echo.common.models.Lyrics
 import dev.brahmkshatriya.echo.common.models.Playlist
 import dev.brahmkshatriya.echo.common.models.Shelf
 import dev.brahmkshatriya.echo.common.models.Track
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -73,5 +74,29 @@ class BilibiliExtensionTest {
         assertEquals(listOf("第一句", "第二句", "结尾"), parsed.list.map { it.text })
         assertEquals(listOf(2500L, 3025L, 60000L), parsed.list.map { it.startTime })
         assertEquals(3025L, parsed.list.first().endTime)
+    }
+
+    @Test fun videoPartsSurviveRecommendationFailure() = runBlocking {
+        val detail = Json.parseToJsonElement("""
+            {"title":"多 P 视频","owner":{"mid":42,"name":"UP"},"cid":10,
+             "ugc_season":{"id":7,"mid":42,"title":"合集"},
+             "pages":[{"cid":10,"page":1,"part":"第一集"},
+                      {"cid":20,"page":2,"part":"第二集"}]}
+        """).obj()
+        val feed = extension.trackFeed("BV1XN411K7g9", detail) {
+            throw java.io.IOException("recommendations unavailable")
+        }
+        val shelves = feed!!.getPagedData(null).pagedData.loadPage(null).data
+        assertEquals(listOf("合集", "分 P"), shelves.map { it.title })
+        val parts = (shelves[1] as Shelf.Lists.Tracks).list
+        assertEquals(listOf("v:BV1XN411K7g9", "v:BV1XN411K7g9:20"), parts.map { it.id })
+
+        var cancelled = false
+        try {
+            extension.trackFeed("BV1XN411K7g9", detail) { throw CancellationException() }
+        } catch (_: CancellationException) {
+            cancelled = true
+        }
+        assertTrue(cancelled)
     }
 }
